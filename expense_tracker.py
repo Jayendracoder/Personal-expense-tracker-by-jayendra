@@ -1,115 +1,159 @@
+"""A small, CSV-backed personal expense tracker.
+
+Run with: python expense_tracker.py
+The CSV and budget JSON files are stored beside this script.
+"""
+from __future__ import annotations
+
 import csv
-import os
-from datetime import datetime
+import json
+from collections import defaultdict
+from datetime import date, datetime
+from decimal import Decimal, InvalidOperation
+from pathlib import Path
 
-# Global variables
-expenses = []
-budget = 0.0
-filename = "expenses.csv"
+BASE_DIR = Path(__file__).resolve().parent
+DATA_FILE = BASE_DIR / "expenses.csv"
+BUDGET_FILE = BASE_DIR / "budgets.json"
+FIELDS = ["date", "category", "amount", "description"]
 
-# Load expenses from file
-def load_expenses():
-    global expenses
-    if os.path.exists(filename):
-        with open(filename, mode='r', newline='') as file:
-            reader = csv.DictReader(file)
-            for row in reader:
-                try:
-                    expense = {
-                        'date': row['date'],
-                        'category': row['category'],
-                        'amount': float(row['amount']),
-                        'description': row['description']
-                    }
-                    expenses.append(expense)
-                except Exception as e:
-                    print(f"Skipping corrupted row: {row} - Error: {e}")
-        print("Expenses loaded successfully.")
-    else:
-        print("No previous data found. Starting fresh.")
 
-# Save expenses to file
-def save_expenses():
-    with open(filename, mode='w', newline='') as file:
-        fieldnames = ['date', 'category', 'amount', 'description']
-        writer = csv.DictWriter(file, fieldnames=fieldnames)
+def load_expenses(path: Path = DATA_FILE) -> list[dict]:
+    """Load valid expense rows; skip malformed rows without stopping the app."""
+    if not path.exists():
+        return []
+    expenses = []
+    with path.open("r", newline="", encoding="utf-8") as handle:
+        for row in csv.DictReader(handle):
+            try:
+                parsed_date = date.fromisoformat(row["date"])
+                amount = Decimal(row["amount"])
+                category = row["category"].strip()
+                if amount <= 0 or not category:
+                    continue
+                expenses.append({
+                    "date": parsed_date.isoformat(),
+                    "category": category,
+                    "amount": amount,
+                    "description": (row.get("description") or "").strip(),
+                })
+            except (KeyError, ValueError, InvalidOperation, TypeError):
+                continue
+    return expenses
+
+
+def save_expenses(expenses: list[dict], path: Path = DATA_FILE) -> None:
+    """Persist expenses in a stable CSV format."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=FIELDS)
         writer.writeheader()
-        for exp in expenses:
-            writer.writerow(exp)
-    print("Expenses saved successfully.")
+        for item in expenses:
+            writer.writerow({**item, "amount": f"{Decimal(item['amount']):.2f}"})
 
-# Add a new expense
-def add_expense():
+
+def load_budgets(path: Path = BUDGET_FILE) -> dict[str, Decimal]:
+    if not path.exists():
+        return {}
     try:
-        date = input("Enter the date (YYYY-MM-DD): ")
-        datetime.strptime(date, "%Y-%m-%d")  # validate date format
-        category = input("Enter the category (e.g., Food, Travel): ")
-        amount = float(input("Enter the amount spent: "))
-        description = input("Enter a brief description: ")
-        expense = {'date': date, 'category': category, 'amount': amount, 'description': description}
-        expenses.append(expense)
-        print("Expense added successfully.")
-    except ValueError:
-        print("Invalid input. Please try again.")
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        return {key: Decimal(value) for key, value in raw.items()}
+    except (json.JSONDecodeError, InvalidOperation, AttributeError):
+        return {}
 
-# View all expenses
-def view_expenses():
-    if not expenses:
-        print("No expenses recorded yet.")
+
+def save_budgets(budgets: dict[str, Decimal], path: Path = BUDGET_FILE) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {month: str(amount) for month, amount in budgets.items()}
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def month_total(expenses: list[dict], month: str) -> Decimal:
+    return sum(
+        (Decimal(item["amount"]) for item in expenses if item["date"].startswith(month)),
+        start=Decimal("0"),
+    )
+
+
+def add_expense(expenses: list[dict]) -> None:
+    try:
+        expense_date = date.fromisoformat(input("Date (YYYY-MM-DD): ").strip())
+        category = input("Category: ").strip()
+        amount = Decimal(input("Amount: ").strip())
+        description = input("Description: ").strip()
+        if not category or amount <= 0:
+            raise ValueError("Category is required and amount must be positive.")
+    except (ValueError, InvalidOperation):
+        print("Invalid input. Please check the date, category and positive amount.")
         return
-    print("\n--- Your Expenses ---")
-    for exp in expenses:
-        if all(k in exp and exp[k] for k in ['date', 'category', 'amount', 'description']):
-            print(f"Date: {exp['date']} | Category: {exp['category']} | Amount: ${exp['amount']:.2f} | Description: {exp['description']}")
-        else:
-            print("Incomplete expense entry found. Skipping.")
+    expenses.append({
+        "date": expense_date.isoformat(),
+        "category": category,
+        "amount": amount,
+        "description": description,
+    })
+    print("Expense added.")
 
-# Set and track the budget
-def track_budget():
-    global budget
-    if budget == 0:
-        try:
-            budget = float(input("Enter your monthly budget: "))
-        except ValueError:
-            print("Invalid input. Please enter a number.")
-            return
 
-    total_expense = sum(exp['amount'] for exp in expenses)
-    remaining = budget - total_expense
+def show_expenses(expenses: list[dict], month: str | None = None) -> None:
+    selected = [item for item in expenses if month is None or item["date"].startswith(month)]
+    if not selected:
+        print("No expenses found.")
+        return
+    print("\nDate       | Category       | Amount   | Description")
+    print("-" * 68)
+    for item in sorted(selected, key=lambda row: row["date"]):
+        print(f"{item['date']} | {item['category'][:14]:14} | {Decimal(item['amount']):8.2f} | {item['description']}")
+    print(f"Total: {sum((Decimal(item['amount']) for item in selected), Decimal('0')):.2f}")
 
-    print(f"\nTotal spent so far: ${total_expense:.2f}")
-    if total_expense > budget:
-        print("⚠️ You have exceeded your budget!")
-    else:
-        print(f"✅ You have ${remaining:.2f} left for the month.")
 
-# Interactive menu
-def main_menu():
-    load_expenses()
+def main() -> None:
+    expenses = load_expenses()
+    budgets = load_budgets()
     while True:
-        print("\n==== Personal Expense Tracker ====")
-        print("1. Add Expense")
-        print("2. View Expenses")
-        print("3. Track Budget")
-        print("4. Save Expenses")
-        print("5. Exit")
-        choice = input("Choose an option (1-5): ")
-
-        if choice == '1':
-            add_expense()
-        elif choice == '2':
-            view_expenses()
-        elif choice == '3':
-            track_budget()
-        elif choice == '4':
-            save_expenses()
-        elif choice == '5':
-            save_expenses()
-            print("Goodbye! Your expenses have been saved.")
+        print("\n=== Personal Expense Tracker ===")
+        print("1. Add expense  2. View all  3. Monthly summary")
+        print("4. Set monthly budget  5. Exit")
+        choice = input("Choose (1-5): ").strip()
+        if choice == "1":
+            add_expense(expenses)
+            save_expenses(expenses)
+        elif choice == "2":
+            show_expenses(expenses)
+        elif choice == "3":
+            month = input("Month (YYYY-MM): ").strip()
+            try:
+                datetime.strptime(month, "%Y-%m")
+            except ValueError:
+                print("Enter month as YYYY-MM.")
+                continue
+            total = month_total(expenses, month)
+            budget = budgets.get(month)
+            print(f"Spent in {month}: {total:.2f}")
+            if budget is not None:
+                print(f"Budget: {budget:.2f} | Remaining: {budget - total:.2f}")
+            show_expenses(expenses, month)
+        elif choice == "4":
+            month = input("Month (YYYY-MM): ").strip()
+            try:
+                datetime.strptime(month, "%Y-%m")
+                amount = Decimal(input("Budget amount: ").strip())
+                if amount <= 0:
+                    raise ValueError
+            except (ValueError, InvalidOperation):
+                print("Enter a valid month and positive budget.")
+                continue
+            budgets[month] = amount
+            save_budgets(budgets)
+            print("Budget saved.")
+        elif choice == "5":
+            save_expenses(expenses)
+            save_budgets(budgets)
+            print("Saved. Goodbye!")
             break
         else:
-            print("Invalid option. Please choose a number from 1 to 5.")
+            print("Choose a number from 1 to 5.")
 
-# Start the program
+
 if __name__ == "__main__":
-    main_menu()
+    main()
